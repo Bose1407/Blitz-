@@ -4,84 +4,110 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import joblib
-from sklearn.ensemble import RandomForestClassifier
+import os
+from flask_limiter import Limiter, RateLimitExceeded
+from flask_limiter.util import get_remote_address
+from joblib import Parallel, delayed
 
 app = Flask(__name__)
 CORS(app)
 
-# Load the trained models
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["500 per day", "100 per hour"]
+)
+
 models = {
-    f'Load{i}': joblib.load(f'load{i}_status_model.pkl') 
+    f'Load{i}': joblib.load(os.getenv(f'LOAD{i}_MODEL_PATH', f'load{i}_status_model.pkl'))
     for i in range(1, 6)
 }
 
 def calculate_cost(data):
-    peak_rate = 0.20  # $/kWh during peak hours (8 AM to 8 PM)
-    off_peak_rate = 0.10  # $/kWh during off-peak hours
-    
-    hour = datetime.now().hour
-    rate = peak_rate if 8 <= hour < 20 else off_peak_rate
-    
-    total_power = sum(
-        power * (1 if status == 'ON' else 0)
-        for power, status in zip(
-            [data[f'Load{i}_Power'] for i in range(1, 6)],
-            [data[f'Load{i}_Status'] for i in range(1, 6)]
-        )
-    )
-    
-    return (total_power * rate) / 1000  # Convert to kWh
 
-@app.route('/api/status', methods=['GET'])
-def get_status():
-    # Generate mock current data
-    current_data = {
-        f'Load{i}_Power': np.random.normal(500, 100)
+    base_rate = 4.80  # ₹/kWh base rate
+    peak_factor = 0.25  
+    off_peak_factor = 0.0
+
+    # Calculate effective rates
+    peak_rate = base_rate * (1 + peak_factor)  # 6.00 ₹/kWh
+    off_peak_rate = base_rate * (1 + off_peak_factor)  # 4.80 ₹/kWh
+
+    # Tamil Nadu peak hours (5-9 AM and 6-10 PM)
+    hour = datetime.now().hour
+    is_peak = (5 <= hour < 9) or (18 <= hour < 22)
+    rate = peak_rate if is_peak else off_peak_rate
+
+    # Calculate total power consumption
+    total_power = sum(
+        data.get(f'Load{i}_Power', 0) * (1 if data.get(f'Load{i}_Status', 'OFF') == 'ON' else 0)
+        for i in range(1, 6)
+    )
+
+    return (total_power * rate) / 1000
+
+def generate_mock_data():
+    return {
+        f'Load{i}_Power': max(0, np.random.normal(500, 100))
         for i in range(1, 6)
     }
-    
-    # Get predictions from models
-    predictions = {}
-    features = pd.DataFrame([list(current_data.values())])
-    
-    for load_name, model in models.items():
+
+def predict_load(model, features):
+    try:
         pred = model.predict(features)[0]
-        predictions[load_name] = 'ON' if pred == 1 else 'OFF'
-        current_data[f'{load_name}_Status'] = predictions[load_name]
-    
-    cost = calculate_cost(current_data)
-    
-    return jsonify({
-        'status': predictions,
-        'power': current_data,
-        'cost': cost
-    })
+        return 'ON' if pred == 1 else 'OFF'
+    except Exception as e:
+        return 'OFF'
+
+@app.route('/api/status', methods=['GET'])
+@limiter.limit("30 per minute")
+def get_status():
+    try:
+        np.random.seed(42)
+        current_data = generate_mock_data()
+        
+        features = pd.DataFrame([list(current_data.values())])
+        predictions = Parallel(n_jobs=-1)(
+            delayed(predict_load)(model, features)
+            for model in models.values()
+        )
+        
+        for i, (load_name, pred) in enumerate(zip(models.keys(), predictions)):
+            current_data[f'{load_name}_Status'] = pred
+        
+        cost = calculate_cost(current_data)
+        
+        return jsonify({
+            'status': dict(zip(models.keys(), predictions)),
+            'power': current_data,
+            'cost': round(cost, 2) 
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/history', methods=['GET'])
+@limiter.limit("20 per minute")
 def get_history():
-    # Generate mock historical data
-    timestamps = [
-        datetime.now() - timedelta(hours=i)
-        for i in range(24, -1, -1)
-    ]
-    
-    history = []
-    for ts in timestamps:
-        data = {
-            'timestamp': ts.isoformat(),
-            'cost': np.random.uniform(0.1, 0.5),
-            **{
-                f'Load{i}_Power': np.random.normal(500, 100)
-                for i in range(1, 6)
-            },
-            **{
-                f'Load{i}_Status': np.random.choice(['ON', 'OFF'])
-                for i in range(1, 6)
+    try:
+        timestamps = [datetime.now() - timedelta(hours=i) for i in range(24, -1, -1)]
+        
+        history = [
+            {
+                'timestamp': ts.isoformat(),
+                'cost': round(np.random.uniform(2.5, 8.5), 2),  # INR values
+                **generate_mock_data(),
+                **{f'Load{i}_Status': np.random.choice(['ON', 'OFF']) for i in range(1, 6)}
             }
-        }
-        history.append(data)
-    
-    return jsonify(history)
+            for ts in timestamps
+        ]
+        
+        return jsonify(history)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.errorhandler(RateLimitExceeded)
+def handle_rate_limit_exceeded(e):
+    return jsonify({"error": "Rate limit exceeded. Please try again later."}), 429
 
 if __name__ == '__main__':
     app.run(debug=True)
