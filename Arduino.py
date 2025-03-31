@@ -47,4 +47,4 @@ def fetch_status():
 
 while True:
     fetch_status()
-    time.sleep(10) 
+    time.sleep(2) 

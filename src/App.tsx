@@ -3,7 +3,6 @@ import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import { Power, DollarSign, Activity, Clock } from 'lucide-react';
 import { format } from 'date-fns';
-
 interface LoadStatus {
   status: Record<string, string>;
   power: Record<string, number>;
@@ -20,6 +19,7 @@ function App() {
   const [currentStatus, setCurrentStatus] = useState<LoadStatus | null>(null);
   const [history, setHistory] = useState<HistoryData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [updating, setUpdating] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -29,6 +29,8 @@ function App() {
           axios.get('http://localhost:5000/api/history')
         ]);
         setCurrentStatus(statusRes.data);
+        console.log(statusRes.data);
+        
         setHistory(historyRes.data);
       } catch (error) {
         console.error('Error fetching data:', error);
@@ -38,9 +40,40 @@ function App() {
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 30000);
-    return () => clearInterval(interval);
+    
   }, []);
+
+  const handleToggle = async (load: string) => {
+    if (!currentStatus) return;
+    
+    setUpdating(load);
+    const newStatus = currentStatus.status[load] === 'ON' ? 'OFF' : 'ON';
+    
+    try {
+      await axios.post('http://localhost:5000/api/toggle', {
+        load,
+        status: newStatus
+      });
+      
+      // Update local state
+      setCurrentStatus(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          status: {
+            ...prev.status,
+            [load]: newStatus
+          }
+        };
+      });
+    } catch (error) {
+      console.error('Error toggling load:', error);
+      // Revert the toggle if there's an error
+      alert('Failed to toggle load. Please try again.');
+    } finally {
+      setUpdating(null);
+    }
+  };
 
   if (loading) {
     return (
@@ -79,11 +112,19 @@ function App() {
                     <Power className={`h-5 w-5 ${status === 'ON' ? 'text-green-500' : 'text-red-500'}`} />
                     <span className="ml-2 font-medium">{load}</span>
                   </div>
-                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                    status === 'ON' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                  }`}>
-                    {status}
-                  </span>
+                  <button
+                    onClick={() => handleToggle(load)}
+                    disabled={updating === load}
+                    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                      status === 'ON' ? 'bg-green-500' : 'bg-gray-200'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                        status === 'ON' ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
                 </div>
                 <div className="mt-2">
                   <span className="text-sm text-gray-500">Power Consumption:</span>

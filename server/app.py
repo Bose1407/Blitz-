@@ -18,13 +18,15 @@ limiter = Limiter(
     default_limits=["500 per day", "100 per hour"]
 )
 
+# Global state to store current load statuses
+current_load_status = {}
+
 models = {
     f'Load{i}': joblib.load(os.getenv(f'LOAD{i}_MODEL_PATH', f'load{i}_status_model.pkl'))
     for i in range(1, 6)
 }
 
 def calculate_cost(data):
-
     base_rate = 4.80  # ₹/kWh base rate
     peak_factor = 0.25  
     off_peak_factor = 0.0
@@ -66,21 +68,54 @@ def get_status():
         np.random.seed(42)
         current_data = generate_mock_data()
         
-        features = pd.DataFrame([list(current_data.values())])
-        predictions = Parallel(n_jobs=-1)(
-            delayed(predict_load)(model, features)
-            for model in models.values()
-        )
+        # If we don't have any stored status, predict them
+        if not current_load_status:
+            features = pd.DataFrame([list(current_data.values())])
+            predictions = Parallel(n_jobs=-1)(
+                delayed(predict_load)(model, features)
+                for model in models.values()
+            )
+            current_load_status.update(dict(zip(models.keys(), predictions)))
         
-        for i, (load_name, pred) in enumerate(zip(models.keys(), predictions)):
-            current_data[f'{load_name}_Status'] = pred
+        # Update the current data with stored statuses
+        for load_name in models.keys():
+            current_data[f'{load_name}_Status'] = current_load_status.get(load_name, 'OFF')
         
         cost = calculate_cost(current_data)
         
         return jsonify({
-            'status': dict(zip(models.keys(), predictions)),
+            'status': current_load_status,
             'power': current_data,
             'cost': round(cost, 2) 
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/toggle', methods=['POST'])
+@limiter.limit("30 per minute")
+def toggle_load():
+    try:
+        data = request.get_json()
+        load = data.get('load')
+        status = data.get('status')
+
+        if not load or not status or load not in models.keys() or status not in ['ON', 'OFF']:
+            return jsonify({'error': 'Invalid request parameters'}), 400
+
+        # Update the stored status
+        current_load_status[load] = status
+
+        # Generate current data and use the stored status
+        current_data = generate_mock_data()
+        current_data[f'{load}_Status'] = status
+        
+        # Calculate new cost with updated status
+        cost = calculate_cost(current_data)
+
+        return jsonify({
+            'status': current_load_status,
+            'power': current_data,
+            'cost': round(cost, 2)
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
